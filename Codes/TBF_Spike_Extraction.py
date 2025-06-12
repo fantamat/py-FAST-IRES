@@ -81,3 +81,7 @@ def TBF_Spike_Extraction():
     sio.savemat('ICA.mat', {'ICA': ICA})
     os.chdir('../../Codes')
     return ICA
+
+
+if __name__ == "__main__":
+    TBF_Spike_Extraction()

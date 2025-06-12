@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.io as sio
 import os
+import time
 from numpy.linalg import svd, pinv, eig
 from scipy.stats import chi2
 from Codes.norms import norms
@@ -138,7 +139,6 @@ def FIRES_Sz_Rot():
     stop_itr = 0
     weight_it = 0
     max_weight_itr_num = Number_iteration
-    import time
     t1 = time.time()
     for i_alpha in range(Num_alpha):
         alpha = alpha_vec[i_alpha]
@@ -194,4 +194,6 @@ def FIRES_Sz_Rot():
     sio.savemat('Parameters.mat', {'Parameters': Parameters})
     os.chdir('../Codes')
 
-# To run: FIRES_Sz_Rot()
+
+if __name__ == "__main__":
+    FIRES_Sz_Rot()

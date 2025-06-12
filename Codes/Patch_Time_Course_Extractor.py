@@ -145,4 +145,6 @@ def Patch_Time_Course_Extractor():
     sio.savemat('IND_src.mat', {'IND_src': IND_src})
     os.chdir('../Codes')
 
-# To run: Patch_Time_Course_Extractor()
+
+if __name__ == "__main__":
+    Patch_Time_Course_Extractor()

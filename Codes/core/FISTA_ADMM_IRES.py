@@ -1,5 +1,5 @@
 import numpy as np
-from Codes.norms import norms
+from core.norms import norms
 
 # Placeholders for MATLAB-specific functions
 # You must implement or replace these with your own Python equivalents

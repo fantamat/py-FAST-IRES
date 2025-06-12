@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import scipy.io as sio
 from numpy.linalg import svd, norm, pinv
 from scipy.stats import zscore
@@ -14,7 +15,6 @@ def readlocs(filename):
 
 def TBF_Selection_Seizure():
     # Load data
-    import os
     os.chdir('../Raw 273')
     Elec_loc = readlocs('273_ele_ERD.xyz')
     data_sz_tot = sio.loadmat('data_sz_tot.mat')['data_sz_tot']
@@ -76,3 +76,6 @@ def TBF_Selection_Seizure():
     # plt.xlim([0, 50])
     # plt.show()
     return EEG_Sz_3_First
+
+if __name__ == "__main__":
+    EEG_Sz_3_First = TBF_Selection_Seizure()
