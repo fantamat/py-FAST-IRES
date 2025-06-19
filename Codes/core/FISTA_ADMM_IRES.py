@@ -1,21 +1,24 @@
 import numpy as np
 from core.norms import norms
 
+from core.Proj_Flat_Hyper_Ellips import Proj_Flat_Hyper_Ellips
+
 # Placeholders for MATLAB-specific functions
 # You must implement or replace these with your own Python equivalents
 # e.g., wthresh, Proj_Flat_Hyper_Ellips
 
 def wthresh(x, mode, thresh):
-    # Soft thresholding (mode 's')
-    if mode == 's':
+    """
+    Thresholding function similar to MATLAB's wthresh.
+    mode: 's' for soft, 'h' for hard thresholding.
+    """
+    if mode == 's':  # Soft threshold
         return np.sign(x) * np.maximum(np.abs(x) - thresh, 0)
+    elif mode == 'h':  # Hard threshold
+        return x * (np.abs(x) > thresh)
     else:
-        raise NotImplementedError("Only soft thresholding ('s') is implemented.")
+        raise ValueError("Second argument must be 's' (soft) or 'h' (hard)")
 
-def Proj_Flat_Hyper_Ellips(delta, Phi_i, phi_hat, U, D, K_U, Tp_norm, num_it_new):
-    # Placeholder: implement as needed
-    # Should return a correction term for x_new
-    return np.zeros_like(phi_hat)
 
 def FISTA_ADMM_IRES(Phi, TBF, TBF_norm, T_norm, alpha, lambda_, W_v, V, L_v, x_0, W, W_d, epsilon, betta_tilda, U, D, K, K_U, num_it_x, num_it_y, num_it_new):
     Alpha = np.diag(np.sum(np.abs(x_0), axis=0) / np.max(np.sum(np.abs(x_0), axis=0)))
@@ -29,8 +32,10 @@ def FISTA_ADMM_IRES(Phi, TBF, TBF_norm, T_norm, alpha, lambda_, W_v, V, L_v, x_0
     e_abs = 1e-8
     tau = 2
     mu = 10
+
     while y_cond:
         y_it += 1
+        print(f"y_it: {y_it}")
         if y_it > num_it_y:
             y_cond = False
         t_old = 1
@@ -59,7 +64,9 @@ def FISTA_ADMM_IRES(Phi, TBF, TBF_norm, T_norm, alpha, lambda_, W_v, V, L_v, x_0
             x_old = x_new
             t_old = t_new
         y_new = wthresh(V @ x_new - u, 's', W_d / lambda_)
-        if np.linalg.norm(y - y_new, 'fro') / np.linalg.norm(y_new, 'fro') < epsilon:
+        y_new_norm = np.linalg.norm(y_new, 'fro')
+        print(f"y_new_norm: {y_new_norm}")
+        if y_new_norm > 0 and np.linalg.norm(y - y_new, 'fro') / y_new_norm < epsilon:
             y_cond = False
         prim_res = np.linalg.norm(y_new - V @ x_new, 'fro')
         dual_res = np.linalg.norm(lambda_ * (V.T) @ (y - y_new), 'fro')

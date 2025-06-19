@@ -19,7 +19,7 @@ def Proj_Flat_Hyper_Ellips(betta_tilda, Phi_i, phi_hat, U, D, K_U, Tp_norm, num_
         return myfun(lambda_, Phi, D_0, Betta)
 
     # Find lambda_ini using a root-finding method (fzero equivalent)
-    sol = root_scalar(fun, bracket=[0, 1e6], method='brentq')
+    sol = root_scalar(fun, method='secant', x0=Init_zero)
     lambda_ini = max(sol.root, 0) if sol.converged else 0
 
     # Compute the correction E
