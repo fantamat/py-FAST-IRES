@@ -1,0 +1,9 @@
+transformers
+datasets
+torch
+pillow
+google-cloud-documentai
+google-genai
+requests
+pydantic
+fastapi

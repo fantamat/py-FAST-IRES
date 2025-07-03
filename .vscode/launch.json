@@ -1,0 +1,26 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "envFile": "${workspaceFolder}/.env",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Invoice test",
+            "type": "debugpy",
+            "envFile": "${workspaceFolder}/.env",
+            "request": "launch",
+            "program": "${workspaceFolder}/invoice_service/test_main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/invoice_service",
+        }
+    ]
+}

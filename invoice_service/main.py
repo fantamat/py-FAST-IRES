@@ -1,0 +1,466 @@
+import os
+import tempfile
+import base64
+import logging
+import sqlite3
+import json
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Dict, Optional, List, Any, Union
+from datetime import datetime
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import JSONResponse, Response
+import uvicorn
+from PIL import Image
+from google import genai
+from markitdown import MarkItDown  # Microsoft's library for converting documents to markdown
+from pdf2image import convert_from_path
+
+from invoice_types import Invoice
+
+
+# Configure logging
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+log_file = LOG_DIR / "invoice_service.log"
+
+# Create logger
+logger = logging.getLogger("invoice_service")
+logger.setLevel(logging.INFO)
+
+# Setup SQLite database
+DB_DIR = Path("db")
+DB_DIR.mkdir(exist_ok=True)
+DB_PATH = DB_DIR / "invoices.db"
+
+def setup_database():
+    """Initialize the SQLite database with required tables."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Create table for storing invoice processing data
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS invoice_processes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_type TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        token_count INTEGER,
+        request_json TEXT,
+        response_json TEXT,
+        error_message TEXT,
+        file_content BLOB
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Database initialized at {DB_PATH}")
+
+# Initialize database on module load
+setup_database()
+
+# Create handlers
+file_handler = RotatingFileHandler(
+    log_file, 
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5
+)
+console_handler = logging.StreamHandler()
+
+# Create formatters and add it to handlers
+log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(log_format)
+console_handler.setFormatter(log_format)
+
+# Add handlers to the logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+app = FastAPI(
+    title="Invoice Processing Service",
+    description="Service for extracting structured data from invoice images or documents",
+    version="1.0.0",
+)
+
+# Initialize Google Gemini client
+client = None  # Will be initialized on startup
+
+
+@app.on_event("startup")
+async def startup_event():
+    global client
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        logger.error("GEMINI_API_KEY environment variable not set")
+        raise RuntimeError("GEMINI_API_KEY environment variable not set")
+    client = genai.Client(api_key=api_key)
+    logger.info("Google Gemini client initialized")
+
+
+def save_to_database(file_id: str, file_name: str, file_type: str, token_count: Optional[int] = None, 
+                    request_data: Optional[Dict] = None, response_data: Optional[Dict] = None, 
+                    error_message: Optional[str] = None, file_content: Optional[bytes] = None):
+    """Save processing data to SQLite database."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO invoice_processes 
+        (file_id, file_name, file_type, timestamp, token_count, request_json, response_json, error_message, file_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            file_id,
+            file_name,
+            file_type,
+            datetime.now().isoformat(),
+            token_count,
+            json.dumps(request_data) if request_data else None,
+            json.dumps(response_data) if response_data else None,
+            error_message,
+            file_content
+        ))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Saved processing data for file {file_name} to database")
+    except Exception as e:
+        logger.error(f"Error saving to database: {str(e)}")
+
+
+def process_image(image_path: str) -> Dict[str, Any]:
+    """Process an image using Gemini and extract invoice data"""
+    try:
+        image = Image.open(image_path)
+        
+        logger.info(f"Processing image: {Path(image_path).name}")
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-pro-preview-03-25",
+            contents=[image, "Extract the structured data from the image in the given JSON format."],
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': Invoice,
+            },
+        )
+        
+        invoice: Invoice = response.parsed
+        token_count = response.usage_metadata.total_token_count
+        
+        # Log token usage
+        logger.info(f"File processed: {Path(image_path).name}, tokens used: {token_count}")
+        
+        return {
+            "invoice": invoice.model_dump(),
+            "total_token_count": token_count,
+        }
+    except Exception as e:
+        logger.error(f"Error processing image {image_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+
+def process_pdf(pdf_path: str) -> Dict[str, Any]:
+    """Process a PDF document using Gemini"""
+    try:
+        # Use MarkItDown to convert PDF to markdown text
+        md = MarkItDown(enable_plugins=False)
+        with open(pdf_path, 'rb') as f:
+            result = md.convert_stream(f, mime_type='application/pdf')
+        
+        markdown_text = result.text_content
+        logger.info(f"PDF converted to markdown text using MarkItDown")
+        
+        # Also convert PDF to image for visual analysis
+        images = convert_from_path(pdf_path)
+        
+        # Save the first page as an image
+        temp_img_path = tempfile.mktemp(suffix='.jpg')
+        images[0].save(temp_img_path, 'JPEG')
+        
+        # Process with Gemini using both the markdown text and image
+        response = client.models.generate_content(
+            model="gemini-2.5-pro-preview-03-25",
+            contents=[
+                Image.open(temp_img_path),
+                f"Extract the structured invoice data from this document. The document contains the following text:\n\n{markdown_text[:4000]}",  # Limit text length
+                "Extract the structured data in the given JSON format."
+            ],
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': Invoice,
+            },
+        )
+        
+        invoice: Invoice = response.parsed
+        token_count = response.usage_metadata.total_token_count
+        
+        # Log token usage
+        logger.info(f"PDF processed: {Path(pdf_path).name}, tokens used: {token_count}")
+        
+        # Clean up temporary files
+        os.remove(temp_img_path)
+        
+        return {
+            "invoice": invoice.model_dump(),
+            "total_token_count": token_count,
+        }
+    except Exception as e:
+        logger.error(f"Error processing PDF {pdf_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+
+
+def process_docx(docx_path: str) -> Dict[str, Any]:
+    """Process a DOCX document using Gemini"""
+    try:
+        # Use MarkItDown to convert DOCX to markdown text
+        md = MarkItDown(enable_plugins=False)
+        with open(docx_path, 'rb') as f:
+            result = md.convert_stream(f, mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+        
+        markdown_text = result.text_content
+        logger.info(f"DOCX converted to markdown text using MarkItDown")
+        
+        # Process with Gemini
+        response = client.models.generate_content(
+            model="gemini-2.5-pro-preview-03-25",
+            contents=[
+                f"Extract the structured invoice data from this document. The document contains the following text:\n\n{markdown_text[:4000]}",  # Limit text length
+                "Extract the structured data in the given JSON format."
+            ],
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': Invoice,
+            },
+        )
+        
+        invoice: Invoice = response.parsed
+        token_count = response.usage_metadata.total_token_count
+        
+        # Log token usage
+        logger.info(f"DOCX processed: {Path(docx_path).name}, tokens used: {token_count}")
+        
+        return {
+            "invoice": invoice.model_dump(),
+            "total_token_count": token_count,
+        }
+    except Exception as e:
+        logger.error(f"Error processing DOCX {docx_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing DOCX: {str(e)}")
+
+
+@app.post("/invoice", response_class=JSONResponse)
+async def process_invoice(file: UploadFile = File(...), file_id: str = Form(...)):
+    """
+    Process an invoice document (image, PDF, or DOCX) and extract structured data
+    """
+    # Check file type
+    file_extension = file.filename.lower().split('.')[-1]
+    
+    # Save uploaded file temporarily
+    temp_file_path = tempfile.mktemp(suffix=f'.{file_extension}')
+    try:
+        # Read and save the uploaded file content
+        content = await file.read()
+        file_content = content  # Save the raw file content for database storage
+        
+        # Save to temporary file for processing
+        with open(temp_file_path, 'wb') as temp_file:
+            temp_file.write(content)
+        
+        # Process file based on type
+        try:
+            if file_extension in ['jpg', 'jpeg', 'png']:
+                result = process_image(temp_file_path)
+                file_type = "image"
+            elif file_extension == 'pdf':
+                result = process_pdf(temp_file_path)
+                file_type = "pdf"
+            elif file_extension == 'docx':
+                result = process_docx(temp_file_path)
+                file_type = "docx"
+            else:
+                error_msg = f"Unsupported file format: {file_extension}"                # Log the error to database
+                raise HTTPException(status_code=400, detail=error_msg)
+            
+            # Add file_id to the result
+            result["file_id"] = file_id
+              # Store processing data in database
+            save_to_database(
+                file_id=file_id,
+                file_name=file.filename,
+                file_type=file_type,
+                token_count=result.get("total_token_count"),
+                request_data={"filename": file.filename, "file_id": file_id},
+                response_data=result,
+                file_content=file_content
+            )
+            
+            return result
+        except HTTPException as e:  # Handle HTTP exceptions raised during processing
+            logger.error(f"HTTP error processing file {file.filename}: {str(e)}")
+            raise e
+        except Exception as e:            # Log any other exceptions
+            error_msg = f"Error processing file: {str(e)}"
+            raise HTTPException(status_code=500, detail=error_msg)
+    
+    finally:
+        # Clean up the temp file
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
+@app.get("/healthcheck")
+async def healthcheck():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/history")
+async def get_processing_history(limit: int = 50, offset: int = 0, file_id: Optional[str] = None):
+    """
+    Retrieve processing history from the database
+    
+    Parameters:
+    - limit: Maximum number of records to return (default: 50)
+    - offset: Offset for pagination (default: 0)
+    - file_id: Optional filter by file ID
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+        cursor = conn.cursor()
+        
+        # Build query based on parameters
+        query = "SELECT * FROM invoice_processes"
+        params = []
+        
+        if file_id:
+            query += " WHERE file_id = ?"
+            params.append(file_id)
+            
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        # Count total records for pagination info
+        count_query = "SELECT COUNT(*) as count FROM invoice_processes"
+        if file_id:
+            count_query += " WHERE file_id = ?"
+            cursor.execute(count_query, [file_id])
+        else:
+            cursor.execute(count_query)
+            
+        total_count = cursor.fetchone()["count"]
+          # Convert rows to list of dicts
+        results = []
+        for row in rows:
+            item = dict(row)
+            # Parse JSON strings back to objects
+            if item["request_json"]:
+                item["request_json"] = json.loads(item["request_json"])
+            if item["response_json"]:
+                item["response_json"] = json.loads(item["response_json"])
+            
+            # Check if file content is available and add a flag
+            item["has_file_content"] = item["file_content"] is not None
+            
+            # Don't include the file content in the response to keep it lightweight
+            if "file_content" in item:
+                del item["file_content"]
+                
+            results.append(item)
+            
+        conn.close()
+        
+        return {
+            "total": total_count,
+            "offset": offset,
+            "limit": limit,
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error retrieving history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving processing history: {str(e)}")
+
+
+@app.delete("/history/{record_id}")
+async def delete_history_record(record_id: int):
+    """Delete a specific history record from the database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if record exists
+        cursor.execute("SELECT id FROM invoice_processes WHERE id = ?", [record_id])
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"Record with ID {record_id} not found")
+        
+        cursor.execute("DELETE FROM invoice_processes WHERE id = ?", [record_id])
+        conn.commit()
+        conn.close()
+        
+        return {"message": f"Record {record_id} deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting record: {str(e)}")
+
+
+@app.get("/files/{record_id}")
+async def get_file_content(record_id: int):
+    """Retrieve the original file content by record ID"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+        cursor = conn.cursor()
+        
+        # Get the file details and content
+        cursor.execute("""
+            SELECT file_name, file_type, file_content 
+            FROM invoice_processes 
+            WHERE id = ?
+        """, [record_id])
+        
+        record = cursor.fetchone()
+        conn.close()
+        
+        if not record:
+            raise HTTPException(status_code=404, detail=f"Record with ID {record_id} not found")
+            
+        if not record["file_content"]:
+            raise HTTPException(status_code=404, detail=f"No file content available for record with ID {record_id}")
+            
+        # Determine the content type based on file extension
+        file_extension = record["file_type"].lower()
+        content_type = "application/octet-stream"  # Default
+        
+        if file_extension == "pdf":
+            content_type = "application/pdf"
+        elif file_extension == "docx":
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif file_extension in ["jpg", "jpeg", "png"]:
+            content_type = f"image/{file_extension}"
+              # Create a Response with the file content and appropriate headers
+        return Response(
+            content=record["file_content"],
+            media_type=content_type,
+            headers={"Content-Disposition": f"attachment; filename={record['file_name']}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving file content: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving file content: {str(e)}")
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
