@@ -84,5 +84,6 @@ def FISTA_ADMM_IRES(Phi, TBF, TBF_norm, T_norm, alpha, lambda_, W_v, V, L_v, x_0
         #     lambda_ = lambda_ / tau
         #     u = u * tau
     x = wthresh(x_new, 's', (W @ Alpha) * (alpha / lambda_ / L_v))
-    y = wthresh(V @ x_new - u, 's', W_d / lambda_)
+    y_new = V @ x_new - u
+    y = wthresh(y_new, 's', W_d / lambda_)
     return x, y

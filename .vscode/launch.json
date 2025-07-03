@@ -13,6 +13,13 @@
             "console": "integratedTerminal"
         },
                 {
+            "name": "TBF_Spike_Extraction.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/Codes/TBF_Spike_Extraction.py",
+            "console": "integratedTerminal"
+        },
+                {
             "name": "FIRES_Sz_Rot.py",
             "type": "debugpy",
             "request": "launch",

@@ -189,7 +189,7 @@ def plot_mesh_vtk(curryloc, currytri, Ab_J, J, weight_it, Fig_Folder, perspect):
 
     # Step 2: Create VTK triangles
     triangles = vtk.vtkCellArray()
-    for tri in currytri:
+    for tri in currytri[:len(currytri)]:
         triangle = vtk.vtkTriangle()
         triangle.GetPointIds().SetId(0, tri[0])
         triangle.GetPointIds().SetId(1, tri[1])

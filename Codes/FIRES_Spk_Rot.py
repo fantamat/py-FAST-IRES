@@ -18,6 +18,7 @@ from FIRES_utils import plot_mesh, plot_mesh_vtk, upsample, circshift, readlocs
 # e.g., FISTA_ADMM_IRES, upsample, circshift, readlocs
 
 
+
 def FIRES_Spk_Rot():
     # Set working directory
     grid_dir = 'Grid Location and Defined Parameters/'
@@ -143,6 +144,7 @@ def FIRES_Spk_Rot():
     weight_it = 0
     max_weight_itr_num = Number_iteration
     t1 = time.time()
+
     for i_alpha in range(Num_alpha):
         alpha = alpha_vec[i_alpha]
         x_0 = J_ini
@@ -150,6 +152,7 @@ def FIRES_Spk_Rot():
         weight_it = 0
         W = np.ones((M, Num_TBF))
         W_d = np.ones((N, Num_TBF))
+
         while not stop_itr:
             weight_it += 1
             if weight_it > max_weight_itr_num:
@@ -158,10 +161,12 @@ def FIRES_Spk_Rot():
             x_0 = J
             J_sol[:, :, weight_it - 1, i_alpha] = J
             Y_sol[:, :, weight_it - 1, i_alpha] = Y
+
             J_n = J.reshape((3, Number_dipole // 3, Num_TBF), order='F')
             Ab_J = np.squeeze(norms(J_n)) + 1e-20
             Y_n = (V @ J).reshape((3, Number_edge // 3, Num_TBF), order='F')
             Ab_Y = np.squeeze(norms(Y_n)) + 1e-20
+            
             W_old = W.copy()
             W_tr = 1.0 / (Ab_J / np.tile(np.max(Ab_J, axis=0), (Number_dipole // 3, 1)) + (epsilon + 1e-16))
             

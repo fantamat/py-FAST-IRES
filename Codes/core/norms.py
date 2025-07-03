@@ -12,7 +12,8 @@ def cvx_check_dimension(dim, allow_zero=False):
     """Check if the dimension is valid for numpy arrays."""
     return isinstance(dim, int) and (dim >= 0 if allow_zero else dim > 0)
 
-def norms(x: np.ndarray, p: Optional[Union[int, float]] = 2, dim: Optional[int] = None):
+def norms(x: np.ndarray):
+    return np.linalg.norm(x, axis=0)
     """
     Computation of multiple vector norms (NumPy + Numba version).
     """
