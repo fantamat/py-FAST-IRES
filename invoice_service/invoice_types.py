@@ -43,8 +43,10 @@ class InvoceItem(BaseModel):
 class Invoice(BaseModel):
     customer: Customer = Field(description="Customer name. Unique identification of the company for the supplier")
     billing_account: BillingAccount = Field(description="Billing account. Unique identification of the company for the customer")
+    is_invoice: float = Field(description="What is a probability of this beeing invoice. Number form 0 to 1.")
     
     order_total_price: float = Field(description="Total price of the order")
     order_currency: Currency = Field(description="Currency of the order")
-    
+    purchase_order_id: str = Field(description="Unique identification of the order for the customer. This could be a purchase order number or an external order number, e.g., DNO25052613. Purchase order ID starts with 'DNO' and is followed by the date (YYMMDD) and a sequence number (two digits). This ID may be hand written on the invoice in its top corner.")
+
     items: list[InvoceItem] = Field(description="List of items")

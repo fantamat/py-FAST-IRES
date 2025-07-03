@@ -1,6 +1,5 @@
 import os
 import tempfile
-import base64
 import logging
 import sqlite3
 import json
@@ -30,16 +29,17 @@ logger = logging.getLogger("invoice_service")
 logger.setLevel(logging.INFO)
 
 # Setup SQLite database
-DB_DIR = Path("db")
+DB_DIR = Path(os.environ.get("DB_LOCATION", "db"))
 DB_DIR.mkdir(exist_ok=True)
 DB_PATH = DB_DIR / "invoices.db"
+
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "")
 
 def setup_database():
     """Initialize the SQLite database with required tables."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # Create table for storing invoice processing data
+      # Create table for storing invoice processing data
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS invoice_processes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,10 +48,8 @@ def setup_database():
         file_type TEXT NOT NULL,
         timestamp TEXT NOT NULL,
         token_count INTEGER,
-        request_json TEXT,
         response_json TEXT,
-        error_message TEXT,
-        file_content BLOB
+        error_message TEXT
     )
     ''')
     
@@ -79,30 +77,45 @@ console_handler.setFormatter(log_format)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-app = FastAPI(
-    title="Invoice Processing Service",
-    description="Service for extracting structured data from invoice images or documents",
-    version="1.0.0",
-)
+
 
 # Initialize Google Gemini client
 client = None  # Will be initialized on startup
 
 
-@app.on_event("startup")
-async def startup_event():
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize Google Gemini client
     global client
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         logger.error("GEMINI_API_KEY environment variable not set")
         raise RuntimeError("GEMINI_API_KEY environment variable not set")
+
+    if not MODEL_NAME:
+        logger.error("GEMINI_MODEL environment variable not set")
+        raise RuntimeError("GEMINI_MODEL environment variable not set")
+
     client = genai.Client(api_key=api_key)
     logger.info("Google Gemini client initialized")
+    
+    yield  # This is where the app runs
+    
+    # Shutdown: Clean up resources if needed
+    # No cleanup needed for the Gemini client
 
+app = FastAPI(
+    title="Invoice Processing Service",
+    description="Service for extracting structured data from invoice images or documents",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 def save_to_database(file_id: str, file_name: str, file_type: str, token_count: Optional[int] = None, 
                     request_data: Optional[Dict] = None, response_data: Optional[Dict] = None, 
-                    error_message: Optional[str] = None, file_content: Optional[bytes] = None):
+                    error_message: Optional[str] = None):
     """Save processing data to SQLite database."""
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -110,18 +123,16 @@ def save_to_database(file_id: str, file_name: str, file_type: str, token_count: 
         
         cursor.execute('''
         INSERT INTO invoice_processes 
-        (file_id, file_name, file_type, timestamp, token_count, request_json, response_json, error_message, file_content)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (file_id, file_name, file_type, timestamp, token_count, response_json, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             file_id,
             file_name,
             file_type,
             datetime.now().isoformat(),
             token_count,
-            json.dumps(request_data) if request_data else None,
             json.dumps(response_data) if response_data else None,
-            error_message,
-            file_content
+            error_message
         ))
         
         conn.commit()
@@ -137,9 +148,12 @@ def process_image(image_path: str) -> Dict[str, Any]:
         image = Image.open(image_path)
         
         logger.info(f"Processing image: {Path(image_path).name}")
+        # global client
+        if not client:
+            raise RuntimeError("Gemini client not initialized")
         
         response = client.models.generate_content(
-            model="gemini-2.5-pro-preview-03-25",
+            model=MODEL_NAME,
             contents=[image, "Extract the structured data from the image in the given JSON format."],
             config={
                 'response_mime_type': 'application/json',
@@ -174,20 +188,20 @@ def process_pdf(pdf_path: str) -> Dict[str, Any]:
         logger.info(f"PDF converted to markdown text using MarkItDown")
         
         # Also convert PDF to image for visual analysis
-        images = convert_from_path(pdf_path)
+        contents = convert_from_path(pdf_path)
+        if len(contents) > 5:
+            contents = contents[:5]  # Limit to first 5 pages
+            logger.info(f"PDF has more than 5 pages, limiting to first 5 pages")
         
-        # Save the first page as an image
-        temp_img_path = tempfile.mktemp(suffix='.jpg')
-        images[0].save(temp_img_path, 'JPEG')
+        contents.append(
+            f"Extract the structured invoice data from this document. The document contains the following text:\n\n{markdown_text[:4000]}"
+        )
+        contents.append("Extract the structured data in the given JSON format.")
         
         # Process with Gemini using both the markdown text and image
         response = client.models.generate_content(
-            model="gemini-2.5-pro-preview-03-25",
-            contents=[
-                Image.open(temp_img_path),
-                f"Extract the structured invoice data from this document. The document contains the following text:\n\n{markdown_text[:4000]}",  # Limit text length
-                "Extract the structured data in the given JSON format."
-            ],
+            model=MODEL_NAME,
+            contents=contents,
             config={
                 'response_mime_type': 'application/json',
                 'response_schema': Invoice,
@@ -199,9 +213,6 @@ def process_pdf(pdf_path: str) -> Dict[str, Any]:
         
         # Log token usage
         logger.info(f"PDF processed: {Path(pdf_path).name}, tokens used: {token_count}")
-        
-        # Clean up temporary files
-        os.remove(temp_img_path)
         
         return {
             "invoice": invoice.model_dump(),
@@ -225,7 +236,7 @@ def process_docx(docx_path: str) -> Dict[str, Any]:
         
         # Process with Gemini
         response = client.models.generate_content(
-            model="gemini-2.5-pro-preview-03-25",
+            model=MODEL_NAME,
             contents=[
                 f"Extract the structured invoice data from this document. The document contains the following text:\n\n{markdown_text[:4000]}",  # Limit text length
                 "Extract the structured data in the given JSON format."
@@ -260,11 +271,10 @@ async def process_invoice(file: UploadFile = File(...), file_id: str = Form(...)
     file_extension = file.filename.lower().split('.')[-1]
     
     # Save uploaded file temporarily
-    temp_file_path = tempfile.mktemp(suffix=f'.{file_extension}')
+    temp_file_path = tempfile.mktemp(suffix=f'.{file_extension}')    
     try:
-        # Read and save the uploaded file content
+        # Read the uploaded file content
         content = await file.read()
-        file_content = content  # Save the raw file content for database storage
         
         # Save to temporary file for processing
         with open(temp_file_path, 'wb') as temp_file:
@@ -284,8 +294,7 @@ async def process_invoice(file: UploadFile = File(...), file_id: str = Form(...)
             else:
                 error_msg = f"Unsupported file format: {file_extension}"                # Log the error to database
                 raise HTTPException(status_code=400, detail=error_msg)
-            
-            # Add file_id to the result
+              # Add file_id to the result
             result["file_id"] = file_id
               # Store processing data in database
             save_to_database(
@@ -294,8 +303,7 @@ async def process_invoice(file: UploadFile = File(...), file_id: str = Form(...)
                 file_type=file_type,
                 token_count=result.get("total_token_count"),
                 request_data={"filename": file.filename, "file_id": file_id},
-                response_data=result,
-                file_content=file_content
+                response_data=result
             )
             
             return result
@@ -359,19 +367,9 @@ async def get_processing_history(limit: int = 50, offset: int = 0, file_id: Opti
           # Convert rows to list of dicts
         results = []
         for row in rows:
-            item = dict(row)
-            # Parse JSON strings back to objects
-            if item["request_json"]:
-                item["request_json"] = json.loads(item["request_json"])
+            item = dict(row)            # Parse JSON strings back to objects
             if item["response_json"]:
                 item["response_json"] = json.loads(item["response_json"])
-            
-            # Check if file content is available and add a flag
-            item["has_file_content"] = item["file_content"] is not None
-            
-            # Don't include the file content in the response to keep it lightweight
-            if "file_content" in item:
-                del item["file_content"]
                 
             results.append(item)
             
@@ -413,54 +411,5 @@ async def delete_history_record(record_id: int):
         logger.error(f"Error deleting record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting record: {str(e)}")
 
-
-@app.get("/files/{record_id}")
-async def get_file_content(record_id: int):
-    """Retrieve the original file content by record ID"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row  # Return rows as dictionaries
-        cursor = conn.cursor()
-        
-        # Get the file details and content
-        cursor.execute("""
-            SELECT file_name, file_type, file_content 
-            FROM invoice_processes 
-            WHERE id = ?
-        """, [record_id])
-        
-        record = cursor.fetchone()
-        conn.close()
-        
-        if not record:
-            raise HTTPException(status_code=404, detail=f"Record with ID {record_id} not found")
-            
-        if not record["file_content"]:
-            raise HTTPException(status_code=404, detail=f"No file content available for record with ID {record_id}")
-            
-        # Determine the content type based on file extension
-        file_extension = record["file_type"].lower()
-        content_type = "application/octet-stream"  # Default
-        
-        if file_extension == "pdf":
-            content_type = "application/pdf"
-        elif file_extension == "docx":
-            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        elif file_extension in ["jpg", "jpeg", "png"]:
-            content_type = f"image/{file_extension}"
-              # Create a Response with the file content and appropriate headers
-        return Response(
-            content=record["file_content"],
-            media_type=content_type,
-            headers={"Content-Disposition": f"attachment; filename={record['file_name']}"}
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving file content: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving file content: {str(e)}")
-
-
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
